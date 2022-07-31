@@ -45,7 +45,6 @@
 #include <media/stagefright/foundation/AMessage.h>
 #include <media/stagefright/foundation/AUtils.h>
 #include <media/stagefright/foundation/hexdump.h>
-#include <media/stagefright/MediaCodec.h>
 #include <media/stagefright/MediaCodecConstants.h>
 #include <media/stagefright/SkipCutBuffer.h>
 #include <media/MediaCodecBuffer.h>
@@ -267,7 +266,7 @@ status_t CCodecBufferChannel::queueInputBufferInternal(
                 bool released = input->buffers->releaseBuffer(buffer, nullptr, true);
                 ALOGV("[%s] queueInputBuffer: buffer copied; %sreleased",
                       mName, released ? "" : "not ");
-                buffer.clear();
+                buffer = copy;
             } else {
                 ALOGW("[%s] queueInputBuffer: failed to copy a buffer; this may cause input "
                       "buffer starvation on component.", mName);
@@ -295,6 +294,12 @@ status_t CCodecBufferChannel::queueInputBufferInternal(
             }
         }
     } else if (eos) {
+        Mutexed<Input>::Locked input(mInput);
+        if (input->frameReassembler) {
+            usesFrameReassembler = true;
+            // drain any pending items with eos
+            input->frameReassembler.process(buffer, &items);
+        }
         flags |= C2FrameData::FLAG_END_OF_STREAM;
     }
     if (usesFrameReassembler) {
@@ -354,10 +359,10 @@ status_t CCodecBufferChannel::queueInputBufferInternal(
     } else {
         Mutexed<Input>::Locked input(mInput);
         bool released = false;
-        if (buffer) {
-            released = input->buffers->releaseBuffer(buffer, nullptr, true);
-        } else if (copy) {
+        if (copy) {
             released = input->extraBuffers.releaseSlot(copy, nullptr, true);
+        } else if (buffer) {
+            released = input->buffers->releaseBuffer(buffer, nullptr, true);
         }
         ALOGV("[%s] queueInputBuffer: buffer%s %sreleased",
               mName, (buffer == nullptr) ? "(copy)" : "", released ? "" : "not ");
@@ -935,6 +940,11 @@ status_t CCodecBufferChannel::renderOutputBuffer(
                 };
                 hdr.validTypes |= HdrMetadata::CTA861_3;
                 hdr.cta8613 = cta861_meta;
+            }
+
+            // does not have valid info
+            if (!(hdr.validTypes & (HdrMetadata::SMPTE2086 | HdrMetadata::CTA861_3))) {
+                hdrStaticInfo.reset();
             }
         }
         if (hdr10PlusInfo) {
@@ -1906,7 +1916,7 @@ bool CCodecBufferChannel::handleWork(
 
     int32_t flags = 0;
     if (worklet->output.flags & C2FrameData::FLAG_END_OF_STREAM) {
-        flags |= MediaCodec::BUFFER_FLAG_EOS;
+        flags |= BUFFER_FLAG_END_OF_STREAM;
         ALOGV("[%s] onWorkDone: output EOS", mName);
     }
 
@@ -1944,9 +1954,12 @@ bool CCodecBufferChannel::handleWork(
         sp<MediaCodecBuffer> outBuffer;
         if (output->buffers && output->buffers->registerCsd(initData, &index, &outBuffer) == OK) {
             outBuffer->meta()->setInt64("timeUs", timestamp.peek());
-            outBuffer->meta()->setInt32("flags", MediaCodec::BUFFER_FLAG_CODECCONFIG);
+            outBuffer->meta()->setInt32("flags", BUFFER_FLAG_CODEC_CONFIG);
             ALOGV("[%s] onWorkDone: csd index = %zu [%p]", mName, index, outBuffer.get());
-
+            if (outputFormat) {
+                ALOGD("[%s] sending CSD : output format changed to %s",
+                      mName, outputFormat->debugString().c_str());
+            }
             output.unlock();
             mCallback->onOutputBufferAvailable(index, outBuffer);
         } else {
@@ -1969,7 +1982,7 @@ bool CCodecBufferChannel::handleWork(
             switch (info->coreIndex().coreIndex()) {
                 case C2StreamPictureTypeMaskInfo::CORE_INDEX:
                     if (((C2StreamPictureTypeMaskInfo *)info.get())->value & C2Config::SYNC_FRAME) {
-                        flags |= MediaCodec::BUFFER_FLAG_SYNCFRAME;
+                        flags |= BUFFER_FLAG_KEY_FRAME;
                     }
                     break;
                 default:
@@ -1988,7 +2001,7 @@ bool CCodecBufferChannel::handleWork(
                 notifyClient,
                 timestamp.peek(),
                 flags,
-                outputFormat,
+                (initData == nullptr ? outputFormat : nullptr),
                 worklet->output.ordinal);
     }
     sendOutputBuffers();
@@ -2089,12 +2102,13 @@ status_t CCodecBufferChannel::setSurface(const sp<Surface> &newSurface) {
 }
 
 PipelineWatcher::Clock::duration CCodecBufferChannel::elapsed() {
-    // When client pushed EOS, we want all the work to be done quickly.
     // Otherwise, component may have stalled work due to input starvation up to
     // the sum of the delay in the pipeline.
+    // TODO(b/231253301): When client pushed EOS, the pipeline could have less
+    //                    number of frames.
     size_t n = 0;
-    if (!mInputMetEos) {
-        size_t outputDelay = mOutput.lock()->outputDelay;
+    size_t outputDelay = mOutput.lock()->outputDelay;
+    {
         Mutexed<Input>::Locked input(mInput);
         n = input->inputDelay + input->pipelineDelay + outputDelay + kSmoothnessFactor;
     }

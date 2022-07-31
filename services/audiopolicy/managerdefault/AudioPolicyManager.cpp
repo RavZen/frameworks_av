@@ -1363,9 +1363,10 @@ audio_io_handle_t AudioPolicyManager::getOutputForDevices(
     }
     if (stream == AUDIO_STREAM_TTS) {
         *flags = AUDIO_OUTPUT_FLAG_TTS;
-    } else if (stream == AUDIO_STREAM_VOICE_CALL &&
+    } else if ((stream == AUDIO_STREAM_VOICE_CALL &&
                audio_is_linear_pcm(config->format) &&
-               (*flags & AUDIO_OUTPUT_FLAG_INCALL_MUSIC) == 0) {
+               (*flags & AUDIO_OUTPUT_FLAG_INCALL_MUSIC) == 0) &&
+               (mEngine->getPhoneState() != AUDIO_MODE_IN_CALL)) {
         *flags = (audio_output_flags_t)(AUDIO_OUTPUT_FLAG_VOIP_RX |
                                        AUDIO_OUTPUT_FLAG_DIRECT);
         ALOGV("Set VoIP and Direct output flags for PCM format");
@@ -5816,7 +5817,7 @@ void AudioPolicyManager::checkOutputForAttributes(const audio_attributes_t &attr
     DeviceVector oldDevices = mEngine->getOutputDevicesForAttributes(attr, 0, true /*fromCache*/);
     DeviceVector newDevices = mEngine->getOutputDevicesForAttributes(attr, 0, false /*fromCache*/);
 
-    SortedVector<audio_io_handle_t> srcOutputs = getOutputsForDevices(oldDevices, mPreviousOutputs);
+    SortedVector<audio_io_handle_t> srcOutputs = getOutputsForDevices(oldDevices, mOutputs);
     SortedVector<audio_io_handle_t> dstOutputs = getOutputsForDevices(newDevices, mOutputs);
 
     uint32_t maxLatency = 0;

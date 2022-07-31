@@ -78,7 +78,7 @@ WifiDisplaySource::WifiDisplaySource(
 
     mSupportedSourceVideoFormats.disableAll();
 
-    int32_t maxWfdRes = property_get_int32("media.wfd.max_resolution", 8); // 1920x1080p60
+    int32_t maxWfdRes = property_get_int32("media.wfd.max_resolution", 8); // default 1920x1080p60
 
     mSupportedSourceVideoFormats.setNativeResolution(
             VideoFormats::RESOLUTION_CEA, maxWfdRes);
